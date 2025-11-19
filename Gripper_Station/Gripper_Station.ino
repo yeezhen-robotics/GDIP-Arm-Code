@@ -18,13 +18,14 @@ Adafruit_PWMServoDriver board1 = Adafruit_PWMServoDriver(0x40);       // called 
 #define operation_mode rx_data[0]       // Operation Mode
 #define take_memory_snapshot rx_data[6] // Memory snapshot index
 #define recording_memory_max 20         // Amount of space allocated to memory
-#define autonomous 0                    // Operation Mode Selection
+#define autonomous 2                    // Operation Mode Selection
 #define teach 1                         // Operation Mode Selection
-#define home 2                          // Operation Mode Selection
+#define home 0                          // Operation Mode Selection
 
                       // B,S1,S2,S3,S4, G
 float ServoAngles[6] = { 0, 0, 0, 0, 0, 0};
-int previous_gripper_pos = 0;
+int previous_control_gripper = 0;
+int previous_memory_callback = 0; // Variable to store previous state of the button to detect rising edge of inputs
 int rx_data[7] = {0, 0, 0, 0, 0, 0, 0};                 // Variable to store received data
 float operational_memory[recording_memory_max][6] = {0};   // Memory to maintain teached data
 int previous_operation_mode = 0;
@@ -89,24 +90,37 @@ void loop() {
   }
 
   if (operation_mode == teach) {
-    recording_memory_len = 0;                  // Reset memory buffer
+    if (previous_operation_mode != teach) {
+      recording_memory_len = 0;                  // Reset memory buffer
+    }
     pwm_response_controller(rx_data);
-    if (take_memory_snapshot == 1) {
+    if (take_memory_snapshot == 1 && take_memory_snapshot != previous_memory_callback) { // Rising Edge
+      Serial.print("Saved!");
       save_motor_positions();                  // Save the motor positions in the memory buffer
+      recording_memory_len++;
     }
   }
   else if (operation_mode == autonomous) {
     for (int i = 0; i < recording_memory_len; i++) {
-      pwm_response_pose(operational_memory[i],1.0);
+      if (operation_mode == autonomous) {
+        pwm_response_pose(operational_memory[i],2.0);
+      }
+      //debug_servo_angles();
     }
+    delay(500);
+    
   }
   else if (operation_mode == home) {
-    pwm_response_pose(servos2rest,0.5);
+    pwm_response_pose(servos2rest,2.0);
   }
   else {
-    pwm_response_pose(servos2rest,0.5);
+    pwm_response_pose(servos2rest,2.0);
   }
   previous_operation_mode = operation_mode;
+  previous_memory_callback = take_memory_snapshot;
+  previous_control_gripper = rx_data[Gripper];
+  debug_servo_angles();
+
 }
 
 // Saves all current motor position in operational memory
@@ -114,7 +128,6 @@ void save_motor_positions() {
   for (int i = 0; i < 6; i++) {
     operational_memory[recording_memory_len][i] = ServoAngles[i];
   }
-  recording_memory_len++;
 }
 
 // Moves all motor position according to velocity commands
@@ -131,21 +144,21 @@ void pwm_response_controller(int ctrl[7]) {
   // Arm
   current_angle = ServoAngles[1] + float(ctrl[2]) * 0.1; // Move angle to the servo position according to the received velocity
   board1.setPWM(1, 0, angleToPulse(current_angle));    // Set all my Servos to the specified angle at the current timestep
-  board1.setPWM(2, 0, angleToPulse(180.0 - current_angle));    // Set all my Servos to the specified angle at the current timestep
-  ServoAngles[1] = current_angle; ServoAngles[2] = 180.0 - current_angle;
+  ServoAngles[1] = current_angle;
 
   // End Effector Pitch
-  current_angle = ServoAngles[3] + float(ctrl[3]) * 0.1; // Move angle to the servo position according to the received velocity
-  board1.setPWM(0, 0, angleToPulse(current_angle));    // Set all my Servos to the specified angle at the current timestep
-  ServoAngles[3] = current_angle;
+  current_angle = ServoAngles[2] + float(ctrl[3]) * 0.1; // Move angle to the servo position according to the received velocity
+  board1.setPWM(2, 0, angleToPulse(current_angle));    // Set all my Servos to the specified angle at the current timestep
+  board1.setPWM(3, 0, angleToPulse(180 - current_angle));      // Set all my Servos to the specified angle at the current timestep
+  ServoAngles[3] = 180.0 - current_angle; ServoAngles[2] = current_angle;
 
   // Twist
   current_angle = ServoAngles[4] + float(ctrl[4]) * 0.1; // Move angle to the servo position according to the received velocity
-  board1.setPWM(0, 0, angleToPulse(current_angle));    // Set all my Servos to the specified angle at the current timestep
+  board1.setPWM(4, 0, angleToPulse(current_angle));    // Set all my Servos to the specified angle at the current timestep
   ServoAngles[4] = current_angle;
 
   // Jaw
-  if (ctrl[Gripper] == 1) {
+  if (ctrl[Gripper] != previous_control_gripper && ctrl[Gripper] == 1) { // Raising Edge of the Clock
     switch_gripper_state();
   }
 
@@ -157,24 +170,29 @@ void pwm_response_pose(float qf[6], float period) {
   float tf = period, current_angle, t; // initial, final time and real time variable
   int steps = (int)(tf*60);            // steps for linspace resolution
 
+  //Serial.println("Updating...");
+
   // Priority Group 1
-  for (int s = 0; s < steps; s++) {    // evaluate sinusoid at times for plotting
-    t = s*0.0167;                      // 1/60 Approx. 0.016666...
-    for(int i = SweepAddressStart; i < SweepAddressMid; i++) {    
-      current_angle = sinusoid(qf[i],ServoAngles[i],PI/tf,t);      // Calculate Sinusoid Trajectory
-      board1.setPWM(i, 0, angleToPulse(current_angle));         // Set all my Servos to the specified angle at the current timestep
+  if (qf[0] != ServoAngles[0] || qf[1] != ServoAngles[1] || qf[2] != ServoAngles[2]) {
+    for (int s = 0; s < steps; s++) {    // evaluate sinusoid at times for plotting
+      t = s*0.0167;                      // 1/60 Approx. 0.016666...
+      for(int i = SweepAddressStart; i < SweepAddressMid; i++) {
+        current_angle = sinusoid(qf[i],ServoAngles[i],PI/tf,t);   // Calculate Sinusoid Trajectory
+        board1.setPWM(i, 0, angleToPulse(current_angle));         // Set all my Servos to the specified angle at the current timestep
+      }
+      delay(17);
     }
-    delay(17);                         // Match Servo's Update Rate of 60 Hz
   }
 
   // Priority Group 2
-  for (int s = 0; s < steps; s++) {    // evaluate sinusoid at times for plotting
-    t = s*0.0167;                      // 1/60 Approx. 0.016666...
-    for(int i = SweepAddressMid; i < SweepAddressEnd; i++) {    
-      current_angle = sinusoid(qf[i],ServoAngles[i],PI/tf,t);      // Calculate Sinusoid Trajectory
-      board1.setPWM(i, 0, angleToPulse(current_angle));         // Set all my Servos to the specified angle at the current timestep
+  if (qf[3] != ServoAngles[3] || qf[4] != ServoAngles[4]) {
+    for (int s = 0; s < steps; s++) {    // evaluate sinusoid at times for plotting
+      t = s*0.0167;                      // 1/60 Approx. 0.016666...
+      for(int i = SweepAddressMid; i < SweepAddressEnd; i++) {    
+        current_angle = sinusoid(qf[i],ServoAngles[i],PI/tf,t);      // Calculate Sinusoid Trajectory
+        board1.setPWM(i, 0, angleToPulse(current_angle));         // Set all my Servos to the specified angle at the current timestep
+      }
     }
-    delay(17);                         // Match Servo's Update Rate of 60 Hz
   }
 
   // Priority Group 3
@@ -191,7 +209,7 @@ void pwm_response_pose(float qf[6], float period) {
 void switch_gripper_state() {
 
   // initial, final time and real time variable
-  float tf = 0.25, current_angle, t;
+  float tf = 1, current_angle, t;
   // steps for linspace resolution
   int steps = (int)(tf*60), qf;
 
@@ -210,7 +228,6 @@ void switch_gripper_state() {
     t = s*0.0167; // 1/60 Approx. 0.016666...
     current_angle = sinusoid(qf,ServoAngles[Gripper],PI/tf,t);   // Calculate Sinusoid Trajectory
     board1.setPWM(Gripper, 0, angleToPulse(current_angle));            // Set Servo Angle
-    delay(17); // Match Servo's Update Rate of 60 Hz
   }
 
   board1.setPWM(Gripper, qf, angleToPulse(current_angle));            // Set Servo Angle
@@ -234,19 +251,17 @@ void debug_transmission(int rx_data[7]) {
     Serial.println(rx_data[6]);           /* Print received value on Serial Monitor */
 }
 
-void debug_transmission(int rx_data[7]) {
-    Serial.print("Received Data : ");
-    Serial.print(ServoAngles);           /* Print received value on Serial Monitor */
+void debug_servo_angles() {
+    Serial.print("ServoAngles: ");
+    Serial.print(ServoAngles[0]);           /* Print received value on Serial Monitor */
     Serial.print("|");
-    Serial.print(rx_data[1]);           /* Print received value on Serial Monitor */
+    Serial.print(ServoAngles[1]);           /* Print received value on Serial Monitor */
     Serial.print("|");
-    Serial.print(rx_data[2]);           /* Print received value on Serial Monitor */
+    Serial.print(ServoAngles[2]);           /* Print received value on Serial Monitor */
     Serial.print("|");
-    Serial.print(rx_data[3]);           /* Print received value on Serial Monitor */
+    Serial.print(ServoAngles[3]);           /* Print received value on Serial Monitor */
     Serial.print("|");
-    Serial.print(rx_data[4]);           /* Print received value on Serial Monitor */
+    Serial.print(ServoAngles[4]);           /* Print received value on Serial Monitor */
     Serial.print("|");
-    Serial.print(rx_data[5]);           /* Print received value on Serial Monitor */
-    Serial.print("|");
-    Serial.println(rx_data[6]);           /* Print received value on Serial Monitor */
+    Serial.println(ServoAngles[5]);           /* Print received value on Serial Monitor */
 }
