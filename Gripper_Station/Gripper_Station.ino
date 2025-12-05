@@ -9,7 +9,7 @@ Adafruit_PWMServoDriver board1 = Adafruit_PWMServoDriver(0x40);       // called 
 #define SERVOMIN  125         // this is the 'minimum' pulse length count (out of 4096)
 #define SERVOMAX  625         // this is the 'maximum' pulse length count (out of 4096)
 #define SweepAddressStart 0   // This is where the microcontroller begins sweeping through the servos
-#define SweepAddressMid 3
+#define SweepAddressMid 4
 #define SweepAddressEnd 5
 #define Gripper 5
 #define GripperClose 360.0              // Angle to allow for gripper to close
@@ -29,7 +29,7 @@ int previous_memory_callback = 0; // Variable to store previous state of the but
 int rx_data[7] = {0, 0, 0, 0, 0, 0, 0};                 // Variable to store received data
 float operational_memory[recording_memory_max][6] = {0};   // Memory to maintain teached data
 int previous_operation_mode = 0;
-float servos2rest[6] = { 90, 90, 90, 90, 90, GripperOpen}; // Positions to home servos
+float servos2rest[6] = { 90, 50, 80, 90, 95, GripperOpen}; // Positions to home servos
 int recording_memory_index = 0, recording_memory_len = 0;  // Memory trackers
 
 #define CE_PIN 8
@@ -102,9 +102,18 @@ void loop() {
   }
   else if (operation_mode == autonomous) {
     for (int i = 0; i < recording_memory_len; i++) {
+
+      // Update buffer data to escape loop
+      if (radio.available()) {
+        radio.read(&rx_data, sizeof(rx_data)); /* Read the received data and store in ' rx_data ' */
+        //debug_transmission(rx_data);
+      }
+
+      // Only run autonomous mode if its switched on
       if (operation_mode == autonomous) {
         pwm_response_pose(operational_memory[i],2.0);
       }
+      
       //debug_servo_angles();
     }
     delay(500);
@@ -119,7 +128,7 @@ void loop() {
   previous_operation_mode = operation_mode;
   previous_memory_callback = take_memory_snapshot;
   previous_control_gripper = rx_data[Gripper];
-  debug_servo_angles();
+  //debug_servo_angles();
 
 }
 
@@ -134,23 +143,26 @@ void save_motor_positions() {
 // Values used in ctrl function only include the motor commands (Index 1-5)
 void pwm_response_controller(int ctrl[7]) {
 
-  float current_angle = 0;
+  float current_angle = 0, current_angle_base = 0;
 
   // Base
-  current_angle = ServoAngles[0] + float(ctrl[1]) * 0.1; // Move angle to the servo position according to the received velocity
+  current_angle = ServoAngles[0] + float(ctrl[1]) * 0.05; // Move angle to the servo position according to the received velocity
   board1.setPWM(0, 0, angleToPulse(current_angle));    // Set all my Servos to the specified angle at the current timestep
   ServoAngles[0] = current_angle;
 
   // Arm
-  current_angle = ServoAngles[1] + float(ctrl[2]) * 0.1; // Move angle to the servo position according to the received velocity
-  board1.setPWM(1, 0, angleToPulse(current_angle));    // Set all my Servos to the specified angle at the current timestep
-  ServoAngles[1] = current_angle;
+  current_angle_base = ServoAngles[1] + float(ctrl[2]) * 0.05; // Move angle to the servo position according to the received velocity
+  board1.setPWM(1, 0, angleToPulse(current_angle_base));    // Set all my Servos to the specified angle at the current timestep
+  ServoAngles[1] = current_angle_base;
 
   // End Effector Pitch
-  current_angle = ServoAngles[2] + float(ctrl[3]) * 0.1; // Move angle to the servo position according to the received velocity
+  current_angle = ServoAngles[2] + float(ctrl[3]) * 0.05; // Move angle to the servo position according to the received velocity
   board1.setPWM(2, 0, angleToPulse(current_angle));    // Set all my Servos to the specified angle at the current timestep
-  board1.setPWM(3, 0, angleToPulse(180 - current_angle));      // Set all my Servos to the specified angle at the current timestep
-  ServoAngles[3] = 180.0 - current_angle; ServoAngles[2] = current_angle;
+  ServoAngles[2] = current_angle;
+
+  // This pitch is special, I want this to always be parallel to the ground
+  board1.setPWM(3, 0, angleToPulse(270 - (current_angle_base + current_angle + 40)));  // Set all my Servos to the specified angle at the current timestep
+  ServoAngles[3] = 270 - (current_angle_base + current_angle + 40);
 
   // Twist
   current_angle = ServoAngles[4] + float(ctrl[4]) * 0.1; // Move angle to the servo position according to the received velocity
@@ -172,8 +184,9 @@ void pwm_response_pose(float qf[6], float period) {
 
   //Serial.println("Updating...");
 
+  debug_angles(qf);
   // Priority Group 1
-  if (qf[0] != ServoAngles[0] || qf[1] != ServoAngles[1] || qf[2] != ServoAngles[2]) {
+  if (qf[0] != ServoAngles[0] || qf[1] != ServoAngles[1] || qf[2] != ServoAngles[2] || qf[3] != ServoAngles[3]) {
     for (int s = 0; s < steps; s++) {    // evaluate sinusoid at times for plotting
       t = s*0.0167;                      // 1/60 Approx. 0.016666...
       for(int i = SweepAddressStart; i < SweepAddressMid; i++) {
@@ -185,7 +198,7 @@ void pwm_response_pose(float qf[6], float period) {
   }
 
   // Priority Group 2
-  if (qf[3] != ServoAngles[3] || qf[4] != ServoAngles[4]) {
+  if (qf[4] != ServoAngles[4]) {
     for (int s = 0; s < steps; s++) {    // evaluate sinusoid at times for plotting
       t = s*0.0167;                      // 1/60 Approx. 0.016666...
       for(int i = SweepAddressMid; i < SweepAddressEnd; i++) {    
@@ -264,4 +277,19 @@ void debug_servo_angles() {
     Serial.print(ServoAngles[4]);           /* Print received value on Serial Monitor */
     Serial.print("|");
     Serial.println(ServoAngles[5]);           /* Print received value on Serial Monitor */
+}
+
+void debug_angles(float angles[6]) {
+    Serial.print("Angles: ");
+    Serial.print(angles[0]);           /* Print received value on Serial Monitor */
+    Serial.print("|");
+    Serial.print(angles[1]);           /* Print received value on Serial Monitor */
+    Serial.print("|");
+    Serial.print(angles[2]);           /* Print received value on Serial Monitor */
+    Serial.print("|");
+    Serial.print(angles[3]);           /* Print received value on Serial Monitor */
+    Serial.print("|");
+    Serial.print(angles[4]);           /* Print received value on Serial Monitor */
+    Serial.print("|");
+    Serial.println(angles[5]);           /* Print received value on Serial Monitor */
 }
